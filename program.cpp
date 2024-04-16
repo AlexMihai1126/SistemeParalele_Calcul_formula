@@ -7,11 +7,14 @@
 #define TAG_VECTOR_X 1
 #define TAG_VECTOR_Y 2
 #define TAG_MATRIX_A 3
+#define TAG_SUMA_JOS 4
+#define TAG_SUMA_SUS 5
+#define inDebugMode 0
+#define showReceivedData 0
 #define MASTER_PROC_ID 0
 
 using namespace std;
-// serializam matricea rowsToSend linii si N coloane
-// Serialize a portion of the matrix into a 1D array, starting from a given offset row
+// serializam o bucata din matrice in vector unidimensional, pornind de la un anumit rand (dat de offset) si cate randuri trimitem
 void serialize(const vector<vector<float>> &data, float *buffer, int offset, int rowsToSend)
 {
     int index = 0;
@@ -24,7 +27,7 @@ void serialize(const vector<vector<float>> &data, float *buffer, int offset, int
     }
 }
 
-// Deserialize a 1D array into a vector<vector<float>> matrix
+// deserializam o bucata din matrice din vector unidimensional in vector bidimensional, cunoscand numarul de randuri primite
 void deserialize(const float *buffer, vector<vector<float>> &data, int rowsToReceive)
 {
     data.clear();
@@ -38,6 +41,29 @@ void deserialize(const float *buffer, vector<vector<float>> &data, int rowsToRec
         }
         data.push_back(row);
     }
+}
+
+float calculateLow(vector<float> xData, vector<float> yData, int numOfElements)
+{
+    float suma = 0.0f;
+    for (int i = 0; i < numOfElements; i++)
+    {
+        suma += xData[i] * yData[i];
+    }
+    return suma;
+}
+
+float calculateHigh(vector<float> xData, vector<float> yData, vector<vector<float>> matData, int noOfElements)
+{
+    float suma = 0.0f;
+    for (int i = 0; i < noOfElements; i++)
+    {
+        for (int j = 0; j < N; j++)
+        {
+            suma += xData[i] * matData[i][j] * yData[j];
+        }
+    }
+    return suma;
 }
 
 int main(int argc, char **argv)
@@ -75,14 +101,29 @@ int main(int argc, char **argv)
 
     if (mainRank < lowGroupMaxRank)
     {
-        // cout<<"Low group process with rank "<<mainRank<<" and low group rank "<<secondRank<<endl;
+        if (inDebugMode == 1)
+        {
+            cout << "Proces din grupul LOW cu rank principal: " << mainRank << " si rank in grupul LOW: " << secondRank << endl;
+        }
+
         int masterLow = 0;
         int elementsPerProcess = N / (lowGroupMaxRank - 1); // calculam numarul de elemente care va fi procesat de fiecare worker
-        int remainder = N % (lowGroupMaxRank - 1);
+        int r = N % (lowGroupMaxRank - 1);
+        float localLowSum = 0.0f;
+        float totalLowSum = 0.0f;
         if (mainRank == lowGroupMaxRank - 1)
         {
-            elementsPerProcess += remainder;
+            elementsPerProcess += r;
         } // daca nu se poate imparti egal, ultimul proces va primi restul de elemente
+
+        if (inDebugMode == 1)
+        {
+            if (secondRank != 0)
+            {
+                cout << "Procesul cu ID: " << mainRank << " va primi " << elementsPerProcess << " date."
+                     << " WORKER LOW GROUP" << endl;
+            }
+        }
 
         if (secondRank == 0 && mainRank < lowGroupMaxRank)
         {
@@ -93,7 +134,7 @@ int main(int argc, char **argv)
             ifstream xFile("x.dat");
             if (!xFile.is_open())
             {
-                cerr << "Error: Unable to open x.dat for reading." << endl;
+                cerr << "Eroare deschidere x.dat." << endl;
                 MPI_Finalize();
                 return 0;
             }
@@ -107,7 +148,7 @@ int main(int argc, char **argv)
             ifstream yFile("y.dat");
             if (!yFile.is_open())
             {
-                cerr << "Error: Unable to open y.dat for reading." << endl;
+                cerr << "Eroare deschidere y.dat." << endl;
                 MPI_Finalize();
                 return 0;
             }
@@ -117,53 +158,79 @@ int main(int argc, char **argv)
             }
             yFile.close();
 
-            // Send data to every process in the lowComm group
-            for (int destRank = 1; destRank < lowGroupMaxRank; ++destRank) // Start from 1 to skip sending to itself
+            // trimitem date la fiecare worker
+            for (int destRank = 1; destRank < lowGroupMaxRank; ++destRank) // pornim de la 1 ca sa nu trimitem si procesului master
             {
-                // Calculate the offset for the current destination process
+                // calculam offset-ul de date pentru procesul curent la care trimitem
                 int offset = (destRank - 1) * elementsPerProcess;
 
-                // Send xData
-                MPI_Send(xData.data() + offset, elementsPerProcess, MPI_FLOAT, destRank, TAG_VECTOR_X, lowComm);
+                // calculam numarul de elemente care trebuie trimise
+                int elementsToSend = elementsPerProcess;
+                if (destRank == lowGroupMaxRank - 1) // daca numarul de workeri este impar ultimul proces primeste si restul de date
+                {
+                    elementsToSend += r;
+                }
 
-                // Send yData
-                MPI_Send(yData.data() + offset, elementsPerProcess, MPI_FLOAT, destRank, TAG_VECTOR_Y, lowComm);
+                MPI_Send(xData.data() + offset, elementsToSend, MPI_FLOAT, destRank, TAG_VECTOR_X, lowComm);
+                MPI_Send(yData.data() + offset, elementsToSend, MPI_FLOAT, destRank, TAG_VECTOR_Y, lowComm);
             }
         }
         else
         {
-            // Allocate memory for received data
             vector<float> localXData(elementsPerProcess);
             vector<float> localYData(elementsPerProcess);
 
-            // Receive xData
             MPI_Recv(localXData.data(), elementsPerProcess, MPI_FLOAT, masterLow, TAG_VECTOR_X, lowComm, MPI_STATUS_IGNORE);
-
-            // Receive yData
             MPI_Recv(localYData.data(), elementsPerProcess, MPI_FLOAT, masterLow, TAG_VECTOR_Y, lowComm, MPI_STATUS_IGNORE);
 
-            /* // Process received data
-            cout << "Process " << mainRank << " received " << elementsPerProcess << " elements of xData and yData."
-                 << endl;
-            for (int i = 0; i < elementsPerProcess; ++i)
+            if (inDebugMode == 1 && showReceivedData == 1)
             {
-                cout << "xData[" << i << "]: " << localXData[i] << ", yData[" << i << "]: " << localYData[i] << endl;
-            } */
+                for (int i = 0; i < elementsPerProcess; ++i)
+                {
+                    cout << "xData[" << i << "]: " << localXData[i] << ", yData[" << i << "]: " << localYData[i] << endl;
+                }
+            }
+
+            localLowSum = calculateLow(localXData, localYData, elementsPerProcess);
+        }
+        MPI_Reduce(&localLowSum, &totalLowSum, 1, MPI_FLOAT, MPI_SUM, masterLow, lowComm);
+        if (secondRank == 0)
+        {
+            if (inDebugMode == 1)
+            {
+                cout << "Suma totala grup LOW: " << totalLowSum << endl;
+            }
+
+            MPI_Send(&totalLowSum, 1, MPI_FLOAT, MASTER_PROC_ID, TAG_SUMA_JOS, MPI_COMM_WORLD);
         }
     }
     else
     {
         if (mainRank >= highGroupMinRank)
         {
-            // cout<<"High group process with rank "<<mainRank<<" and high group rank "<<secondRank<<endl;
+            if (inDebugMode == 1)
+            {
+                cout << "Proces din grupul HIGH cu rank principal: " << mainRank << " si rank din grupul HIGH: " << secondRank << endl;
+            }
+
             int masterHigh = 0;
             int elementsPerProcess = N / ((nrProc - highGroupMinRank) - 1); // calculam numarul de elemente care va fi procesat de fiecare worker
-            int remainder = N % ((nrProc - highGroupMinRank) - 1);
+            int r = N % ((nrProc - highGroupMinRank) - 1);
+            float localSumHigh = 0.0f;
+            float totalSumHigh = 0.0f;
             if (mainRank == (nrProc - 1))
             {
-                elementsPerProcess += remainder;
+                elementsPerProcess += r;
             } // daca nu se poate imparti egal, ultimul proces va primi restul de elemente
 
+            if (inDebugMode == 1)
+            {
+                if (secondRank != 0)
+                {
+                    cout << "Procesul cu ID: " << mainRank << " va primi " << elementsPerProcess << " date."
+                         << " WORKER HIGH GROUP" << endl;
+                }
+            }
             if (secondRank == 0 && mainRank >= highGroupMinRank)
             {
                 vector<float> xData;
@@ -173,7 +240,7 @@ int main(int argc, char **argv)
                 ifstream xFile("x.dat");
                 if (!xFile.is_open())
                 {
-                    cerr << "Error: Unable to open x.dat for reading." << endl;
+                    cerr << "Eroare deschidere x.dat." << endl;
                     MPI_Finalize();
                     return 0;
                 }
@@ -187,7 +254,7 @@ int main(int argc, char **argv)
                 ifstream yFile("y.dat");
                 if (!yFile.is_open())
                 {
-                    cerr << "Error: Unable to open y.dat for reading." << endl;
+                    cerr << "Eroare deschidere y.dat." << endl;
                     MPI_Finalize();
                     return 0;
                 }
@@ -197,10 +264,10 @@ int main(int argc, char **argv)
                 }
                 yFile.close();
 
-                ifstream file("mat.dat");
-                if (!file.is_open())
+                ifstream matFile("mat.dat");
+                if (!matFile.is_open())
                 {
-                    cerr << "Error: Unable to open mat.dat file." << endl;
+                    cerr << "Eroare deschidere mat.dat." << endl;
                     MPI_Finalize();
                     return 0;
                 }
@@ -209,67 +276,106 @@ int main(int argc, char **argv)
                 {
                     for (int j = 0; j < N; ++j)
                     {
-                        file >> matData[i][j];
+                        matFile >> matData[i][j];
                     }
                 }
-                file.close();
+                matFile.close();
 
-                for (int destRank = 1; destRank < lowGroupMaxRank; ++destRank)
+                for (int destRank = 1; destRank < (nrProc - highGroupMinRank); ++destRank)
                 {
                     int offset = (destRank - 1) * elementsPerProcess;
-                    MPI_Send(xData.data() + offset, elementsPerProcess, MPI_FLOAT, destRank, TAG_VECTOR_X, highComm);
+                    int elementsToSend = elementsPerProcess;
+                    if (destRank == (nrProc - highGroupMinRank) - 1) //la fel ca la cele din LOW
+                    {
+                        elementsToSend += r;
+                    }
+
+                    MPI_Send(xData.data() + offset, elementsToSend, MPI_FLOAT, destRank, TAG_VECTOR_X, highComm);
                     MPI_Send(yData.data(), N, MPI_FLOAT, destRank, TAG_VECTOR_Y, highComm);
 
-                    // Serialize matrix data, starting from offset row
-                    auto *buffer = new float[elementsPerProcess * N];
-                    serialize(matData, buffer, offset, elementsPerProcess);
-                    MPI_Send(buffer, elementsPerProcess * N, MPI_FLOAT, destRank, TAG_MATRIX_A, highComm);
+                    // serializam datele matricei corespunzator cu offset si numarul de linii de trimis
+                    auto *buffer = new float[elementsToSend * N];
+                    serialize(matData, buffer, offset, elementsToSend);
+                    MPI_Send(buffer, elementsToSend * N, MPI_FLOAT, destRank, TAG_MATRIX_A, highComm);
                     delete[] buffer;
                 }
             }
             else
             {
-                // primim datele
                 vector<float> localXData(elementsPerProcess);
                 vector<float> localYData(N);
                 vector<vector<float>> localMatData(elementsPerProcess, vector<float>(N));
-                
+
                 MPI_Recv(localXData.data(), elementsPerProcess, MPI_FLOAT, masterHigh, TAG_VECTOR_X, highComm, MPI_STATUS_IGNORE);
                 MPI_Recv(localYData.data(), N, MPI_FLOAT, masterHigh, TAG_VECTOR_Y, highComm, MPI_STATUS_IGNORE);
 
-                // Allocate memory for the buffer
                 auto *buffer = new float[elementsPerProcess * N];
                 MPI_Recv(buffer, elementsPerProcess * N, MPI_FLOAT, masterHigh, TAG_MATRIX_A, highComm, MPI_STATUS_IGNORE);
 
-                // Deserialize matrix data
+                // deserializam matricea corespunzator
                 deserialize(buffer, localMatData, elementsPerProcess);
                 delete[] buffer;
-
-                // Print received data
-                /* cout << "Process " << mainRank << " received X vector:" << endl;
-                for (int i = 0; i < elementsPerProcess; ++i)
+                if (inDebugMode == 1 && showReceivedData == 1)
                 {
-                    cout << localXData[i] << " ";
-                }
-                cout << endl;
-
-                cout << "Process " << mainRank << " received Y vector:" << endl;
-                for (int i = 0; i < N; ++i)
-                {
-                    cout << localYData[i] << " ";
-                }
-                cout << endl; */
-
-                /* cout << "Process " << mainRank << " received Matrix data:" << endl;
-                for (int i = 0; i < elementsPerProcess; ++i)
-                {
-                    for (int j = 0; j < N; ++j)
+                    cout << "Procesul " << mainRank << " a primit datele din vectorul X:" << endl;
+                    for (int i = 0; i < elementsPerProcess; ++i)
                     {
-                        cout << localMatData[i][j] << " ";
+                        cout << localXData[i] << " ";
                     }
                     cout << endl;
-                } */
-            
+
+                    cout << "Procesul " << mainRank << " a primit datele din vectorul Y:" << endl;
+                    for (int i = 0; i < N; ++i)
+                    {
+                        cout << localYData[i] << " ";
+                    }
+                    cout << endl;
+
+                    cout << "Procesul " << mainRank << " a primit datele din matrice:" << endl;
+                    for (int i = 0; i < elementsPerProcess; ++i)
+                    {
+                        for (int j = 0; j < N; ++j)
+                        {
+                            cout << localMatData[i][j] << " ";
+                        }
+                        cout << endl;
+                    }
+                }
+
+                localSumHigh = calculateHigh(localXData, localYData, localMatData, elementsPerProcess);
+            }
+            MPI_Reduce(&localSumHigh, &totalSumHigh, 1, MPI_FLOAT, MPI_SUM, masterHigh, highComm);
+            if (secondRank == 0)
+            {
+                if (inDebugMode == 1)
+                {
+                    cout << "Suma totala grup HIGH: " << totalSumHigh << endl;
+                }
+                MPI_Send(&totalSumHigh, 1, MPI_FLOAT, MASTER_PROC_ID, TAG_SUMA_SUS, MPI_COMM_WORLD);
+            }
+        }
+    }
+    if (mainRank == 0)
+    {
+        float rezultatJos = 0.0f, rezultatSus = 0.0f, cantitateTotala = 0.0f;
+        MPI_Recv(&rezultatJos, 1, MPI_FLOAT, MPI_ANY_SOURCE, TAG_SUMA_JOS, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Recv(&rezultatSus, 1, MPI_FLOAT, MPI_ANY_SOURCE, TAG_SUMA_SUS, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        cantitateTotala = rezultatSus / rezultatJos;
+        if (inDebugMode == 1)
+        {
+            cout << "AVG: " << cantitateTotala << endl;
+        }
+
+        ofstream outputFile("avg.txt");
+        if (outputFile.is_open())
+        {
+            outputFile << "AVG= " << cantitateTotala << endl;
+            outputFile.close();
+            cout << "Rezultat salvat in fisierul avg.txt" << endl;
+        }
+        else
+        {
+            cerr << "Eroare la scrierea lui avg.txt." << endl;
         }
     }
     MPI_Finalize();
